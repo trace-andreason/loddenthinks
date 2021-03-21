@@ -12,9 +12,31 @@ mod loddenthinks {
     pub struct Loddenthinks {
         pub lodden: AccountId,
         pub players: ink_storage::collections::HashMap<AccountId, Balance>,
-        pub question: String,
         pub turn: AccountId,
         pub guess: u64,
+        pub current_over: u64,
+        pub wait_for_reveal: bool,
+    }
+
+    #[ink(event)]
+    pub struct NewLodden {
+        address: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct NewPlayer {
+        address: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct Bet {
+        current_over: u64,
+        turn: AccountId,
+    }
+
+    #[ink(event)]
+    pub struct Result {
+        winner: AccountId,
     }
 
     impl Loddenthinks {
@@ -26,9 +48,10 @@ mod loddenthinks {
             Self {
                 lodden: Default::default(),
                 players: Default::default(),
-                question: String::from(""),
                 turn: Default::default(),
                 guess: Default::default(),
+                current_over: Default::default(),
+                wait_for_reveal: false,
             }
         }
 
@@ -43,41 +66,145 @@ mod loddenthinks {
         }
 
         #[ink(message)]
+        // TODO: is this right?
         pub fn be_lodden(&mut self) -> bool {
-            let caller = Self::env().caller();
-            if caller == AccountId::from([0x0; 32]) {
-                return false
+            if self.is_player() {
+                return false;
             }
+            let caller = Self::env().caller();
+            // if self.lodden != AccountId::from([0x0; 32]) {
+            //     return false;
+            // }
             self.lodden = caller;
-            return true
+            self.env()
+                .emit_event(
+                    NewLodden {
+                        address: self.lodden,
+                    }
+                );
+            true
+        }
+
+        #[ink(message)]
+        // TODO: convert to 2 phase commit
+        pub fn reveal(&mut self) -> bool {
+            if !self.is_lodden() {
+                return false;
+            }
+
+            if !self.wait_for_reveal {
+                return false;
+            }
+
+            true
         }
 
         #[ink(message)]
         pub fn be_player(&mut self) -> bool {
             let caller = Self::env().caller();
             // can't be both a player and lodden
-            if caller == self.lodden {
+            if self.is_lodden() {
                 return false;
             }
             // max two players
             if self.players.len() == 2 {
                 return false;
             }
-            self.players.insert(caller, 0);
-            return true
-        }
 
-        fn is_player(&self) -> bool {
-            return self.players.contains_key(&Self::env().caller());
+            self.players.insert(caller, 0);
+
+            if self.turn == AccountId::from([0x0; 32]) {
+                self.turn = caller;
+            }
+
+            self.env()
+                .emit_event(
+                    NewPlayer {
+                        address: caller,
+                    }
+                );
+
+            true
         }
 
         #[ink(message)]
-        pub fn set_question(&mut self, question: String) -> bool {
-            if !self.is_player() {
+        pub fn bet(&mut self, bet: u64) -> bool {
+            if !self.is_turn() {
                 return false;
             }
-            self.question = question;
-            return true
+            if bet < self.current_over {
+                return false;
+            }
+            self.current_over = bet;
+            self.swap_turn();
+
+            self.env()
+                .emit_event(
+                    Bet {
+                        current_over: self.current_over,
+                        turn: self.turn,
+                    }
+                );
+
+            true
+        }
+
+        #[ink(message)]
+        pub fn stay(&mut self) -> bool {
+            if !self.is_turn() {
+                return false;
+            }
+            self.wait_for_reveal = true;
+            self.env()
+                .emit_event(
+                    Result {
+                        winner: self.winner(),
+                    }
+                );
+            true
+        }
+
+        #[ink(message)]
+        pub fn guess(&mut self, guess: u64) -> bool {
+            if !self.is_lodden() {
+                return false;
+            }
+
+            self.guess = guess;
+            true
+        }
+
+        fn swap_turn(&mut self) {
+            self.turn = self.get_not_turn();
+        }
+
+        fn get_not_turn(&self) -> AccountId {
+            for (key, _) in &self.players {
+                if key != &self.turn {
+                    return *key;
+                }
+            }
+            // should never hit this
+            return AccountId::from([0x0; 32]);
+        }
+
+        fn is_player(&self) -> bool {
+            self.players.contains_key(&Self::env().caller())
+        }
+
+        fn is_lodden(&self) -> bool {
+            self.lodden == Self::env().caller()
+        }
+
+        fn is_turn(&self) -> bool {
+            self.turn == Self::env().caller()
+        }
+
+        fn winner(&self) -> AccountId {
+            if self.current_over >= self.guess {
+                return self.turn;
+            }
+            return self.get_not_turn();
         }
     }
 
@@ -147,17 +274,63 @@ mod loddenthinks {
             assert_eq!(loddenthinks.is_player(), true);
         }
 
-        /// We test if set question works
+        /// We test if is turn works
         #[test]
-        fn set_question_works() {
+        fn is_turn_works() {
             let mut loddenthinks = Loddenthinks::new();
             set_sender(AccountId::from([0x1; 32]));
             assert_eq!(loddenthinks.be_player(), true);
-            assert_eq!(loddenthinks.set_question(String::from("works?")), true);
-            assert_eq!(loddenthinks.question, String::from("works?"));
+            assert_eq!(loddenthinks.is_turn(), true);
+
             set_sender(AccountId::from([0x2; 32]));
-            assert_eq!(loddenthinks.set_question(String::from("no effect")), false);
-            assert_eq!(loddenthinks.question, String::from("works?"));
+            assert_eq!(loddenthinks.be_player(), true);
+            assert_eq!(loddenthinks.is_turn(), false);
         }
+
+        /// We test if get_not_turn works
+        #[test]
+        fn get_not_turn_works() {
+            let mut loddenthinks = Loddenthinks::new();
+            set_sender(AccountId::from([0x1; 32]));
+            assert_eq!(loddenthinks.be_player(), true);
+            assert_eq!(loddenthinks.get_not_turn(), AccountId::from([0x0; 32]));
+
+            set_sender(AccountId::from([0x2; 32]));
+            assert_eq!(loddenthinks.be_player(), true);
+            assert_eq!(loddenthinks.get_not_turn(), AccountId::from([0x2; 32]));
+        }
+
+        /// We test if a full game works
+        #[test]
+        fn test_full_game() {
+            let lodden = AccountId::from([0x1; 32]);
+            let player1 = AccountId::from([0x2; 32]);
+            let player2 = AccountId::from([0x3; 32]);
+
+            let mut loddenthinks = Loddenthinks::new();
+            set_sender(lodden);
+            assert_eq!(loddenthinks.be_lodden(), true);
+            assert_eq!(loddenthinks.guess(10), true);
+
+
+            set_sender(player1);
+            assert_eq!(loddenthinks.be_player(), true);
+
+            set_sender(player2);
+            assert_eq!(loddenthinks.be_player(), true);
+
+            set_sender(player1);
+            assert_eq!(loddenthinks.bet(2), true);
+
+            set_sender(player2);
+            assert_eq!(loddenthinks.bet(4), true);
+
+            set_sender(player1);
+            assert_eq!(loddenthinks.bet(11), true);
+
+            set_sender(player2);
+            assert_eq!(loddenthinks.stay(), true);
+        }
+
     }
 }
